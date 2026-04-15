@@ -127,8 +127,8 @@ This architecture ensures the Trap can dynamically specify which pool needs prot
 
 ```bash
 # Clone repository
-git clone <your-repo-link>
-cd drosera-demo
+git clone https://github.com/ComputerWizzy-Icon/drosera-oracle-guard-demo.git
+cd drosera-oracle-guard-demo
 
 # Install dependencies
 forge install OpenZeppelin/openzeppelin-contracts --no-commit
