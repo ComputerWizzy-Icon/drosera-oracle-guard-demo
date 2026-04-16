@@ -1,4 +1,3 @@
-// src/OracleManipulationTrap.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
@@ -9,34 +8,37 @@ interface IOracleView {
 }
 
 interface IPoolView {
-    function totalValueLocked() external view returns (uint256);
+    function getTVL() external view returns (uint256);
 }
 
 contract OracleManipulationTrap is ITrap {
-    address public immutable oracle;
-    address public immutable pool;
+    address public immutable ORACLE;
+    address public immutable POOL;
 
     uint256 public constant MAX_TVL_DROP_PCT = 20;
 
     struct CollectOutput {
-        address pool; // Added to avoid state reading in shouldRespond
+        address pool;
         uint256 price;
         uint256 tvl;
         uint256 blockNumber;
     }
 
     constructor(address _oracle, address _pool) {
-        oracle = _oracle;
-        pool = _pool;
+        require(_oracle != address(0), "Invalid oracle");
+        require(_pool != address(0), "Invalid pool");
+
+        ORACLE = _oracle;
+        POOL = _pool;
     }
 
     function collect() external view returns (bytes memory) {
         return
             abi.encode(
                 CollectOutput({
-                    pool: pool,
-                    price: IOracleView(oracle).getLatestPrice(),
-                    tvl: IPoolView(pool).totalValueLocked(),
+                    pool: POOL,
+                    price: IOracleView(ORACLE).getLatestPrice(),
+                    tvl: IPoolView(POOL).getTVL(),
                     blockNumber: block.number
                 })
             );
@@ -45,8 +47,7 @@ contract OracleManipulationTrap is ITrap {
     function shouldRespond(
         bytes[] calldata data
     ) external pure returns (bool, bytes memory) {
-        // Must have at least 5 samples for the moving average bonus logic
-        if (data.length < 5) return (false, bytes(""));
+        if (data.length < 5) return (false, "");
 
         CollectOutput memory current = abi.decode(data[0], (CollectOutput));
         CollectOutput memory oldest = abi.decode(
@@ -54,29 +55,50 @@ contract OracleManipulationTrap is ITrap {
             (CollectOutput)
         );
 
-        if (oldest.price == 0 || oldest.tvl == 0) return (false, bytes(""));
+        // ✅ validation
+        for (uint i = 0; i < data.length; i++) {
+            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
 
-        // 1. Check TVL Drop
+            if (sample.pool != current.pool) return (false, "");
+            if (sample.blockNumber == 0) return (false, "");
+
+            if (i > 0) {
+                CollectOutput memory prev = abi.decode(
+                    data[i - 1],
+                    (CollectOutput)
+                );
+
+                if (sample.blockNumber >= prev.blockNumber) {
+                    return (false, "");
+                }
+            }
+        }
+
+        if (oldest.price == 0 || oldest.tvl == 0) return (false, "");
+
+        // TVL drop %
         uint256 tvlDropPct = 0;
         if (current.tvl < oldest.tvl) {
             tvlDropPct = ((oldest.tvl - current.tvl) * 100) / oldest.tvl;
         }
 
-        // 2. Multi-sample Price Average Calculation
-        uint256 baselinePrice = 0;
+        // baseline price (moving average)
+        uint256 baseline = 0;
         for (uint i = 1; i < data.length; i++) {
-            baselinePrice += abi.decode(data[i], (CollectOutput)).price;
+            baseline += abi.decode(data[i], (CollectOutput)).price;
         }
-        baselinePrice = baselinePrice / (data.length - 1);
+        baseline = baseline / (data.length - 1);
 
-        // 3. Trigger Logic
-        if (
-            current.price > (baselinePrice * 5) || tvlDropPct > MAX_TVL_DROP_PCT
-        ) {
-            // We return current.pool from the decoded data to remain 'pure'
+        uint256 upper = baseline * 5;
+        uint256 lower = baseline / 5;
+
+        bool spike = current.price > upper;
+        bool crash = current.price < lower;
+
+        if ((spike || crash) && tvlDropPct > 10) {
             return (true, abi.encode(current.pool));
         }
 
-        return (false, bytes(""));
+        return (false, "");
     }
 }

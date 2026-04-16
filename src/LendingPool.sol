@@ -12,21 +12,20 @@ contract LendingPool is Pausable, Ownable {
     IOracle public immutable oracle;
     address public responder;
 
-    uint256 public totalValueLocked;
     mapping(address => uint256) public collateral;
+    mapping(address => uint256) public debt;
 
     event ResponderUpdated(address indexed responder);
     event Borrowed(address indexed user, uint256 amount, uint256 price);
     event CollateralDeposited(address indexed user, uint256 amount);
     event EmergencyPaused(address indexed responder);
 
-    constructor(address _oracle) payable Ownable(msg.sender) {
+    constructor(address _oracle) Ownable(msg.sender) {
         oracle = IOracle(_oracle);
-        totalValueLocked = msg.value;
     }
 
     modifier onlyResponder() {
-        require(msg.sender == responder, "Not Drosera Responder");
+        require(msg.sender == responder, "Not responder");
         _;
     }
 
@@ -39,7 +38,6 @@ contract LendingPool is Pausable, Ownable {
     function depositCollateral() external payable whenNotPaused {
         require(msg.value > 0, "Zero deposit");
         collateral[msg.sender] += msg.value;
-        totalValueLocked += msg.value;
 
         emit CollateralDeposited(msg.sender, msg.value);
     }
@@ -47,16 +45,19 @@ contract LendingPool is Pausable, Ownable {
     function borrow(uint256 amount) external whenNotPaused {
         uint256 price = oracle.getLatestPrice();
 
-        // Vulnerable logic: Borrow power directly scales with manipulated price
-        uint256 borrowPower = (collateral[msg.sender] * price) / 1000;
+        uint256 borrowPower = (collateral[msg.sender] * price) / 1e18;
 
-        require(borrowPower >= amount, "Inadequate collateral");
-        require(amount <= totalValueLocked, "Insufficient pool liquidity");
+        require(
+            debt[msg.sender] + amount <= borrowPower,
+            "Exceeds borrow power"
+        );
 
-        totalValueLocked -= amount;
+        require(amount <= address(this).balance, "Insufficient liquidity");
+
+        debt[msg.sender] += amount;
 
         (bool sent, ) = payable(msg.sender).call{value: amount}("");
-        require(sent, "ETH transfer failed");
+        require(sent, "Transfer failed");
 
         emit Borrowed(msg.sender, amount, price);
     }
@@ -64,5 +65,9 @@ contract LendingPool is Pausable, Ownable {
     function emergencyPause() external onlyResponder {
         _pause();
         emit EmergencyPaused(msg.sender);
+    }
+
+    function getTVL() external view returns (uint256) {
+        return address(this).balance;
     }
 }

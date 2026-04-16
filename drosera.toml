@@ -5,26 +5,20 @@ eth_chain_id = 560048
 drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 
 [traps.oracle_guard]
-# Path to your compiled Foundry artifact
 path = "out/OracleManipulationTrap.sol/OracleManipulationTrap.json"
 
-# Address of your DroseraResponder contract
-response_contract = "0x2c1DE3b4Dbb4aDebEbB5dcECAe825bE2a9fc6eb6"
+response_contract = "0x10043b7a882E8278b9d7760B7886a527c537aa2C"
 
-# Function signature that the relayer will call on the responder
 response_function = "executeResponse(address)"
 
-# Sampling configuration
 block_sample_size = 5
-cooldown_period_blocks = 25
+cooldown_period_blocks = 2
 
-# Operator constraints
-min_number_of_operators = 1
-max_number_of_operators = 5
+min_number_of_operators = 3
+max_number_of_operators = 7
 
 private_trap = true
 
-# Whitelist for trap management
 whitelist = [
   "0x14e424df0c35686CF58fC7D05860689041D300F6"
-]
+  ]

@@ -1,124 +1,157 @@
 # 🛡 Drosera-Native Security: Oracle Manipulation Guard
 
-A **production-grade autonomous security system** built on the Drosera Network that detects and mitigates **oracle manipulation attacks in real time**.
+A decentralized security simulation built on the Drosera-inspired trap architecture that detects and responds to **oracle manipulation attacks in DeFi protocols in real time**.
 
-This project demonstrates how decentralized “Traps” can act as a **live security layer for DeFi protocols**, replacing static guards with adaptive, state-aware detection logic.
+This project demonstrates how modular “Trap + Responder” systems can act as an **adaptive security layer for lending protocols**, replacing static threshold-based guards with state-aware anomaly detection.
 
 ---
 
 ## 🧠 Core Idea
 
-Traditional DeFi security relies on fixed rules and admin-controlled pauses.
+Traditional DeFi security systems rely on fixed rules like price thresholds or admin-triggered pauses.
 
-This system introduces a **self-observing security layer** powered by Drosera:
+This system introduces a **state-driven security layer** that continuously analyzes on-chain behavior:
 
-* It continuously monitors protocol behavior
-* Learns short-term market context (via rolling history)
-* Detects abnormal deviations in price and liquidity
-* Triggers enforcement only when consensus-backed conditions are met
+* Tracks short-term market history using a rolling window
+* Detects abnormal oracle price movement patterns
+* Monitors liquidity (TVL) changes alongside price shifts
+* Triggers automated response when anomalies align
 
 ---
 
 ## 🏗 System Architecture
 
-The system is built across three coordinated layers:
+The system is composed of three core contracts:
+
+---
 
 ### 1. 🏦 Protocol Layer — `LendingPool`
 
-A collateralized lending protocol that depends on an external AMM oracle for asset valuation.
+A collateral-based lending protocol dependent on an external AMM oracle for pricing.
 
-* Users deposit collateral and borrow against it
-* Vulnerable to oracle manipulation attacks
-* Includes a controlled `Pausable` mechanism for emergency response
+* Users deposit ETH as collateral
+* Borrowing power is calculated using oracle price
+* Includes `Pausable` + emergency shutdown capability
+* Vulnerable by design to oracle manipulation
 
 ---
 
 ### 2. 🧠 Detection Layer — `OracleManipulationTrap`
 
-The core intelligence module implementing the Drosera `ITrap` interface.
+Implements the `ITrap` interface and performs anomaly detection.
 
-It performs **on-chain anomaly detection using historical state analysis**:
+It works by analyzing a **5-block rolling observation window**:
 
-* Maintains a rolling **5-block observation window**
-* Computes a **moving average price baseline**
-* Tracks protocol **TVL (Total Value Locked)** changes
-
----
-
-### 3. ⚡ Enforcement Layer — `DroseraResponder`
-
-Acts as the execution gateway between Drosera consensus and the protocol.
-
-* Receives verified trigger signals from the Drosera network
-* Executes emergency actions (e.g., pausing the protocol)
-* Ensures only authorized consensus-driven responses are executed
+* Captures oracle price per block
+* Captures protocol TVL per block
+* Computes a moving average baseline
+* Detects deviation from expected price behavior
 
 ---
 
-## 🛡 Security Logic (The Trap)
+### 3. ⚡ Response Layer — `DroseraResponder`
 
-Instead of simple threshold checks, this system uses **temporal pattern analysis**.
+Acts as the execution bridge between detection and protocol enforcement.
+
+* Receives encoded trigger payloads (`abi.encode(pool)`)
+* Validates that the pool is approved
+* Calls `emergencyPause()` on the affected pool
+* Prevents repeated execution if already paused
+
+---
+
+## 🛡 Security Logic (Trap Design)
+
+Instead of static thresholds, detection is based on **temporal pattern analysis**.
+
+---
 
 ### 📊 Observation Phase (`collect`)
 
-Each block snapshot captures:
+Each block snapshot records:
 
-* Oracle price
-* Protocol TVL
+* Oracle price from `AMMOracle`
+* Current pool TVL
+* Block number for ordering validation
 
-These are stored in a rolling buffer for analysis.
+These are encoded into `CollectOutput` and stored off-chain in a rolling buffer.
 
 ---
 
 ### 🔍 Detection Phase (`shouldRespond`)
 
-The Trap evaluates a **5-block rolling window** to distinguish:
+The trap evaluates a 5-sample window and verifies:
 
-* natural volatility
-  vs
-* malicious manipulation
+* All samples belong to the same pool
+* Block ordering is valid (no tampering or reordering)
+* No zero-value corruption in price or TVL
+
+It then computes:
+
+* **Moving average price baseline**
+* **TVL percentage drop**
+* **Current price deviation**
 
 ---
 
 ### 🚨 Trigger Conditions
 
-The system responds only when strong anomalies occur:
+The system triggers only when BOTH conditions are met:
 
-* **Price Spike Detection**
+* **Price anomaly**
 
-  * Current price exceeds **500% of moving average**
+  * Current price is > 5× average baseline OR < 1/5 of baseline
 
-* **TVL Drain Detection**
+* **Liquidity stress**
 
-  * Protocol TVL drops by **more than 20%** within the observation window
+  * TVL drops by more than 10% in the observation window
+
+If both conditions match:
+
+```solidity
+return (true, abi.encode(current.pool));
+```
 
 ---
 
 ## 🚀 Technical Components
 
-* **`AMMOracle.sol`** → Simulated manipulatable price feed
-* **`LendingPool.sol`** → Core lending protocol with emergency pause control
-* **`OracleManipulationTrap.sol`** → Detection engine (moving average anomaly detection)
-* **`DroseraResponder.sol`** → Execution bridge for Drosera-driven enforcement
+* `AMMOracle.sol` → Constant product AMM price simulation
+* `LendingPool.sol` → Collateralized lending protocol
+* `OracleManipulationTrap.sol` → Anomaly detection engine
+* `DroseraResponder.sol` → Execution bridge for emergency response
 
 ---
 
-### 🔗 Data Flow & Calldata Mapping
+## 🔁 System Flow
 
-The system uses a precise byte-handshake between the Detection and Enforcement layers:
+1. **Data Collection**
 
-1. **Trigger:** When `shouldRespond` returns `true`, it encodes the target `LendingPool` address into `bytes responseCalldata` using `abi.encode(pool)`.
-2. **Relay:** The Drosera Network captures this bytes payload and passes it to the `DroseraResponder`.
-3. **Execution:** The `DroseraResponder` receives the payload in its `executeResponse(address target)` function.
-4. **Action:** The Responder decodes the payload and calls `LendingPool(target).emergencyPause()`.
+   * Trap collects price + TVL snapshots each block
 
-This architecture ensures the Trap can dynamically specify which pool needs protection without hardcoding addresses in the Responder.
+2. **State Buffering**
+
+   * Test environment simulates a rolling 5-block history
+
+3. **Attack Simulation**
+
+   * Oracle is manipulated via swap
+   * Borrowing becomes artificially inflated
+
+4. **Detection**
+
+   * Trap detects abnormal deviation + liquidity shift
+
+5. **Response**
+
+   * Responder executes `emergencyPause()`
+   * Lending pool is frozen before further damage
 
 ---
 
 ## ⚙️ Prerequisites
 
-* Foundry → [https://book.getfoundry.sh/getting-started/installation](https://book.getfoundry.sh/getting-started/installation)
+* Foundry: [https://book.getfoundry.sh/getting-started/installation](https://book.getfoundry.sh/getting-started/installation)
 * Solidity ^0.8.19
 
 ---
@@ -126,81 +159,76 @@ This architecture ensures the Trap can dynamically specify which pool needs prot
 ## 📦 Setup & Installation
 
 ```bash
-# Clone repository
 git clone https://github.com/ComputerWizzy-Icon/drosera-oracle-guard-demo.git
 cd drosera-oracle-guard-demo
 
-# Install dependencies
 forge install OpenZeppelin/openzeppelin-contracts --no-commit
 ```
 
 ---
 
-## 🧪 Simulation & Testing
+## 🧪 Testing
 
-The test suite simulates a full oracle manipulation attack lifecycle:
+The test suite simulates a full attack lifecycle:
 
-### 1. 🟢 Warm-up Phase
+### 1. Baseline Phase
 
-* 5-block stable market simulation
-* Builds historical baseline for anomaly detection
+* 5 blocks of normal market activity
 
-### 2. 🔥 Exploit Phase
+### 2. Attack Phase
 
-* Attacker manipulates AMM oracle price
-* Attempts to drain up to 50% of protocol liquidity
+* Oracle price is heavily manipulated
+* Borrow power becomes inflated
 
-### 3. 🧠 Detection Phase
+### 3. Detection Phase
 
-* Trap analyzes rolling price + TVL data
-* Detects deviation from expected behavior
+* Trap detects abnormal price + TVL divergence
 
-### 4. ⚡ Mitigation Phase
+### 4. Response Phase
 
-* Drosera consensus triggers responder
-* Lending pool is paused before secondary damage occurs
+* Responder pauses the pool
 
 ---
 
 ## ▶️ Run Tests
 
 ```bash
-forge test --match-path test/Attack.t.sol -vv
+forge test --match-path test/AttackSimulation.t.sol -vv
 ```
 
 ---
 
 ## 💡 Why This Design Matters
 
-### 🔐 1. Decentralized Security Enforcement
+### 🔐 1. Event-Driven Security
 
-No centralized bot or admin control. Detection and response are governed by **Drosera consensus logic**.
+Security is not static. It reacts to **state changes over time**, not single-point thresholds.
 
-### ⚡ 2. Low Overhead Architecture
+### ⚡ 2. Lightweight On-Chain Logic
 
-* Protocol remains lightweight
-* Heavy computation occurs in the Trap layer
-* On-chain execution is minimal and efficient
+Heavy computation is avoided by using off-chain buffering + minimal on-chain validation.
 
-### 🧠 3. Resilient Detection Model
+### 🧠 3. Multi-Signal Detection
 
-The moving average system prevents:
+Combines:
 
-* false positives
-* single-block manipulation tricks
-* noise-based triggers
+* price movement
+* liquidity shifts
+* temporal consistency
+
+This reduces false positives compared to single-metric systems.
 
 ---
 
 ## 🌍 Vision
 
-This system demonstrates a shift from:
+This project demonstrates a shift from:
 
-> “static smart contract security”
+> Static DeFi security models
 
 to:
 
-> “adaptive, autonomous protocol defense systems”
+> Continuous, state-aware protocol defense systems
 
 ---
 
