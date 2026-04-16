@@ -1,35 +1,42 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./interfaces/ITrap.sol";
+import {ITrap} from "./interfaces/ITrap.sol";
 
 interface IOracleView {
     function getLatestPrice() external view returns (uint256);
 }
 
 interface IPoolView {
-    function getTVL() external view returns (uint256);
+    function getTvl() external view returns (uint256);
 }
 
 contract OracleManipulationTrap is ITrap {
+    error UnsupportedChain();
+
+    uint256 internal constant SAMPLE_SIZE = 5;
+    uint256 internal constant PRICE_UPPER_MULTIPLE = 5;
+    uint256 internal constant PRICE_LOWER_DIVISOR = 5;
+    uint256 internal constant TVL_DROP_PCT = 10;
+
     address public immutable ORACLE;
     address public immutable POOL;
 
-    uint256 public constant MAX_TVL_DROP_PCT = 20;
-
     struct CollectOutput {
         address pool;
+        address oracle;
         uint256 price;
         uint256 tvl;
         uint256 blockNumber;
     }
 
-    constructor(address _oracle, address _pool) {
-        require(_oracle != address(0), "Invalid oracle");
-        require(_pool != address(0), "Invalid pool");
-
-        ORACLE = _oracle;
-        POOL = _pool;
+    constructor() {
+        if (block.chainid == 560048) {
+            ORACLE = 0x217970434FD0108F4E9408B6A093e24Ba514CEAA;
+            POOL = 0xa1CE89AB420d0ceeC587F713a798190e547FA5cE;
+        } else {
+            revert UnsupportedChain();
+        }
     }
 
     function collect() external view returns (bytes memory) {
@@ -37,8 +44,9 @@ contract OracleManipulationTrap is ITrap {
             abi.encode(
                 CollectOutput({
                     pool: POOL,
+                    oracle: ORACLE,
                     price: IOracleView(ORACLE).getLatestPrice(),
-                    tvl: IPoolView(POOL).getTVL(),
+                    tvl: IPoolView(POOL).getTvl(),
                     blockNumber: block.number
                 })
             );
@@ -47,58 +55,65 @@ contract OracleManipulationTrap is ITrap {
     function shouldRespond(
         bytes[] calldata data
     ) external pure returns (bool, bytes memory) {
-        if (data.length < 5) return (false, "");
+        if (data.length != SAMPLE_SIZE) return (false, bytes(""));
 
         CollectOutput memory current = abi.decode(data[0], (CollectOutput));
-        CollectOutput memory oldest = abi.decode(
-            data[data.length - 1],
-            (CollectOutput)
-        );
 
-        // ✅ validation
-        for (uint i = 0; i < data.length; i++) {
+        if (
+            current.pool == address(0) ||
+            current.oracle == address(0) ||
+            current.price == 0 ||
+            current.tvl == 0 ||
+            current.blockNumber == 0
+        ) return (false, bytes(""));
+
+        for (uint256 i = 0; i < data.length; i++) {
             CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
 
-            if (sample.pool != current.pool) return (false, "");
-            if (sample.blockNumber == 0) return (false, "");
+            if (sample.pool != current.pool || sample.oracle != current.oracle)
+                return (false, bytes(""));
+
+            if (sample.price == 0 || sample.tvl == 0 || sample.blockNumber == 0)
+                return (false, bytes(""));
 
             if (i > 0) {
                 CollectOutput memory prev = abi.decode(
                     data[i - 1],
                     (CollectOutput)
                 );
-
-                if (sample.blockNumber >= prev.blockNumber) {
-                    return (false, "");
-                }
+                if (prev.blockNumber != sample.blockNumber + 1)
+                    return (false, bytes(""));
             }
         }
 
-        if (oldest.price == 0 || oldest.tvl == 0) return (false, "");
+        uint256 baselinePrice = 0;
+        uint256 baselineTvl = 0;
+        uint256 historyCount = data.length - 1;
 
-        // TVL drop %
-        uint256 tvlDropPct = 0;
-        if (current.tvl < oldest.tvl) {
-            tvlDropPct = ((oldest.tvl - current.tvl) * 100) / oldest.tvl;
+        for (uint256 i = 1; i < data.length; i++) {
+            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
+            baselinePrice += sample.price;
+            baselineTvl += sample.tvl;
         }
 
-        // baseline price (moving average)
-        uint256 baseline = 0;
-        for (uint i = 1; i < data.length; i++) {
-            baseline += abi.decode(data[i], (CollectOutput)).price;
+        if (baselineTvl == 0) return (false, bytes(""));
+
+        baselinePrice /= historyCount;
+        baselineTvl /= historyCount;
+
+        bool spike = current.price > baselinePrice * PRICE_UPPER_MULTIPLE;
+        bool crash = current.price < baselinePrice / PRICE_LOWER_DIVISOR;
+
+        bool tvlStressed = false;
+        if (current.tvl < baselineTvl) {
+            uint256 dropPct = ((baselineTvl - current.tvl) * 100) / baselineTvl;
+            tvlStressed = dropPct > TVL_DROP_PCT;
         }
-        baseline = baseline / (data.length - 1);
 
-        uint256 upper = baseline * 5;
-        uint256 lower = baseline / 5;
-
-        bool spike = current.price > upper;
-        bool crash = current.price < lower;
-
-        if ((spike || crash) && tvlDropPct > 10) {
+        if ((spike || crash) && tvlStressed) {
             return (true, abi.encode(current.pool));
         }
 
-        return (false, "");
+        return (false, bytes(""));
     }
 }

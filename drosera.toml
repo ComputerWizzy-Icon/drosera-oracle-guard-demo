@@ -7,12 +7,12 @@ drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 [traps.oracle_guard]
 path = "out/OracleManipulationTrap.sol/OracleManipulationTrap.json"
 
-response_contract = "0x10043b7a882E8278b9d7760B7886a527c537aa2C"
+response_contract = "0xe0a5c1474f95e626f713c2Add464D4EC231e3747"
 
 response_function = "executeResponse(address)"
 
 block_sample_size = 5
-cooldown_period_blocks = 2
+cooldown_period_blocks = 1
 
 min_number_of_operators = 3
 max_number_of_operators = 7
@@ -21,4 +21,4 @@ private_trap = true
 
 whitelist = [
   "0x14e424df0c35686CF58fC7D05860689041D300F6"
-  ]
+]

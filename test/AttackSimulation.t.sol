@@ -1,16 +1,103 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "forge-std/Test.sol";
-import "../src/AMMOracle.sol";
-import "../src/LendingPool.sol";
-import "../src/OracleManipulationTrap.sol";
-import "../src/DroseraResponder.sol";
+import {Test} from "forge-std/Test.sol";
+import {AMMOracle} from "../src/AMMOracle.sol";
+import {LendingPool} from "../src/LendingPool.sol";
+import {DroseraResponder} from "../src/DroseraResponder.sol";
+
+contract TestTrap {
+    uint256 internal constant SAMPLE_SIZE = 5;
+    uint256 internal constant PRICE_UPPER_MULTIPLE = 5;
+    uint256 internal constant PRICE_LOWER_DIVISOR = 5;
+    uint256 internal constant TVL_DROP_PCT = 10;
+
+    address public immutable ORACLE;
+    address public immutable POOL;
+
+    struct CollectOutput {
+        address pool;
+        address oracle;
+        uint256 price;
+        uint256 tvl;
+        uint256 blockNumber;
+    }
+
+    constructor(address _oracle, address _pool) {
+        ORACLE = _oracle;
+        POOL = _pool;
+    }
+
+    function shouldRespond(
+        bytes[] calldata data
+    ) external pure returns (bool, bytes memory) {
+        if (data.length != SAMPLE_SIZE) return (false, bytes(""));
+
+        CollectOutput memory current = abi.decode(data[0], (CollectOutput));
+
+        if (
+            current.pool == address(0) ||
+            current.oracle == address(0) ||
+            current.price == 0 ||
+            current.tvl == 0 ||
+            current.blockNumber == 0
+        ) return (false, bytes(""));
+
+        for (uint256 i = 0; i < data.length; i++) {
+            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
+
+            if (sample.pool != current.pool || sample.oracle != current.oracle)
+                return (false, bytes(""));
+
+            if (sample.price == 0 || sample.tvl == 0 || sample.blockNumber == 0)
+                return (false, bytes(""));
+
+            if (i > 0) {
+                CollectOutput memory prev = abi.decode(
+                    data[i - 1],
+                    (CollectOutput)
+                );
+                if (prev.blockNumber != sample.blockNumber + 1)
+                    return (false, bytes(""));
+            }
+        }
+
+        uint256 baselinePrice = 0;
+        uint256 baselineTvl = 0;
+        uint256 historyCount = data.length - 1;
+
+        for (uint256 i = 1; i < data.length; i++) {
+            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
+            baselinePrice += sample.price;
+            baselineTvl += sample.tvl;
+        }
+
+        if (baselineTvl == 0) return (false, bytes(""));
+
+        baselinePrice /= historyCount;
+        baselineTvl /= historyCount;
+
+        bool spike = current.price > baselinePrice * PRICE_UPPER_MULTIPLE;
+        bool crash = current.price < baselinePrice / PRICE_LOWER_DIVISOR;
+
+        bool tvlStressed = false;
+        if (current.tvl < baselineTvl) {
+            uint256 dropPct = ((baselineTvl - current.tvl) * 100) / baselineTvl;
+            tvlStressed = dropPct > TVL_DROP_PCT;
+        }
+
+        if ((spike || crash) && tvlStressed) {
+            return (true, abi.encode(current.pool));
+        }
+
+        return (false, bytes(""));
+    }
+}
 
 contract AttackSimulation is Test {
     AMMOracle oracle;
     LendingPool pool;
-    OracleManipulationTrap trap;
+    TestTrap trap;
     DroseraResponder responder;
 
     address owner = address(1);
@@ -19,94 +106,82 @@ contract AttackSimulation is Test {
 
     bytes[] buffer;
 
+    struct CollectOutput {
+        address pool;
+        address oracle;
+        uint256 price;
+        uint256 tvl;
+        uint256 blockNumber;
+    }
+
     function setUp() public {
         vm.startPrank(owner);
 
-        // Deploy with 1:1 price
         oracle = new AMMOracle(1000 ether, 1000 ether);
-        pool = new LendingPool(address(oracle));
-
-        // Seed pool with liquidity
-        vm.deal(address(pool), 100 ether);
-
-        trap = new OracleManipulationTrap(address(oracle), address(pool));
-        responder = new DroseraResponder(relayer, address(pool));
+        pool = new LendingPool(owner, address(oracle));
+        responder = new DroseraResponder(owner, relayer, address(pool));
 
         pool.setResponder(address(responder));
+
+        vm.deal(owner, 200 ether);
+        pool.fundLiquidity{value: 100 ether}();
+
         vm.stopPrank();
 
-        vm.deal(attacker, 10 ether);
+        trap = new TestTrap(address(oracle), address(pool));
 
-        // FIX 1: Correct initialization of bytes array
+        vm.deal(attacker, 10 ether);
         buffer = new bytes[](5);
     }
 
-    function test_attack_detected_and_stopped() public {
-        // 1. Build baseline history (1.0 price)
-        for (uint i = 0; i < 5; i++) {
-            vm.roll(100 + i);
-            for (uint j = 4; j > 0; j--) {
-                buffer[j] = buffer[j - 1];
-            }
-            buffer[0] = trap.collect();
-        }
+    function _sample(
+        uint256 price,
+        uint256 tvl,
+        uint256 blk
+    ) internal view returns (bytes memory) {
+        return
+            abi.encode(
+                CollectOutput({
+                    pool: address(pool),
+                    oracle: address(oracle),
+                    price: price,
+                    tvl: tvl,
+                    blockNumber: blk
+                })
+            );
+    }
 
-        // 2. Attack phase
-        vm.roll(105);
+    function test_attack_detected_and_stopped() public {
+        uint256 normalPrice = 1e18;
+        uint256 normalTvl = 100 ether;
+
+        buffer[4] = _sample(normalPrice, normalTvl, 100);
+        buffer[3] = _sample(normalPrice, normalTvl, 101);
+        buffer[2] = _sample(normalPrice, normalTvl, 102);
+        buffer[1] = _sample(normalPrice, normalTvl, 103);
+
+        vm.roll(104);
         vm.startPrank(attacker);
 
+        oracle.swap1For0(9000 ether);
+
         pool.depositCollateral{value: 1 ether}();
-
-        // FIX 2: Manually manipulate storage to force a PRICE SPIKE (10x)
-        // oracle.swap(900 ether) increases reserve0, crashing the price.
-        // Instead, we set reserve0 low and reserve1 high.
-        // reserve0 = slot 0, reserve1 = slot 1
-        vm.store(
-            address(oracle),
-            bytes32(uint256(0)),
-            bytes32(uint256(100 ether))
-        );
-        vm.store(
-            address(oracle),
-            bytes32(uint256(1)),
-            bytes32(uint256(1000 ether))
-        );
-        // New Price = 10.0 (1000/100)
-
-        // With 1 ETH collateral and 10x price, we have 10 ETH borrow power.
-        // Borrowing 15 ETH would fail, so we borrow 8 ETH.
-        // Wait! To trigger the Trap (TVL drop > 10%), we need to borrow more than 10% of total pool.
-        // Pool has ~101 ETH. Let's borrow 12 ETH.
-        // To borrow 12 ETH, we need our collateral to be worth more. Let's set price to 20x.
-        vm.store(
-            address(oracle),
-            bytes32(uint256(0)),
-            bytes32(uint256(50 ether))
-        );
-        // Price is now 20.0. 1 ETH collateral = 20 ETH borrow power.
-
-        pool.borrow(15 ether); // 15% TVL drop.
+        pool.borrow(15 ether);
 
         vm.stopPrank();
 
-        // 3. Update buffer post-attack
-        for (uint j = 4; j > 0; j--) {
-            buffer[j] = buffer[j - 1];
-        }
-        buffer[0] = trap.collect();
+        buffer[0] = _sample(oracle.getLatestPrice(), pool.getTvl(), 104);
 
-        // 4. Detection
         (bool trigger, bytes memory data) = trap.shouldRespond(buffer);
-        assertTrue(
-            trigger,
-            "Trap did not trigger: Need Spike (>5x) AND TVL drop (>10%)"
-        );
+        assertTrue(trigger, "trap should fire: price spike + TVL drop");
 
-        // 5. Response
         vm.prank(relayer);
         responder.executeResponse(abi.decode(data, (address)));
 
-        // 6. Verify success
-        assertTrue(pool.paused(), "Pool not paused");
+        assertTrue(pool.paused(), "pool should be paused after response");
+
+        vm.prank(relayer);
+        responder.executeResponse(address(pool));
+        assertTrue(pool.paused(), "pool should remain paused");
     }
 }
