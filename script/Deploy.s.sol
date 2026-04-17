@@ -6,6 +6,7 @@ import {console} from "forge-std/console.sol";
 import {AMMOracle} from "../src/AMMOracle.sol";
 import {LendingPool} from "../src/LendingPool.sol";
 import {DroseraResponder} from "../src/DroseraResponder.sol";
+import {OracleManipulationTrap} from "../src/OracleManipulationTrap.sol";
 
 contract Deploy is Script {
     function run() external {
@@ -25,10 +26,14 @@ contract Deploy is Script {
 
         pool.setResponder(address(responder));
 
+        // Trap deployment validates chain ID internally
+        OracleManipulationTrap trap = new OracleManipulationTrap();
+
         vm.stopBroadcast();
 
         console.log("ORACLE:    ", address(oracle));
         console.log("POOL:      ", address(pool));
         console.log("RESPONDER: ", address(responder));
+        console.log("TRAP:      ", address(trap));
     }
 }
