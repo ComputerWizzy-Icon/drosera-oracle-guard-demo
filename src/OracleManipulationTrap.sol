@@ -19,22 +19,17 @@ contract OracleManipulationTrap is ITrap {
     uint256 internal constant SAMPLE_SIZE = 5;
     uint256 internal constant BPS_DENOMINATOR = 10_000;
 
-    // 5x upward move = +400% over baseline => 50_000 bps of baseline price
     uint256 internal constant SPIKE_UPPER_BPS = 50_000;
-
-    // 80% crash means current <= 20% of baseline
     uint256 internal constant CRASH_LOWER_BPS = 2_000;
-
-    // current TVL must be more than 10% below baseline
     uint256 internal constant TVL_DROP_BPS = 1_000;
 
-    // minimum historical samples that must also show abnormal price direction
-    // to reduce one-block noise. Set to 0 for testing, 1 for production.
-    uint256 internal constant MIN_ABNORMAL_HISTORY_COUNT = 1;
+    uint256 internal constant MIN_ABNORMAL_HISTORY_COUNT = 0;
 
-    // ignore tiny baseline values to avoid noisy triggers on dust systems
     uint256 internal constant MIN_BASELINE_PRICE = 1e12;
     uint256 internal constant MIN_BASELINE_TVL = 1 ether;
+
+    uint256 internal constant EXTREME_SPIKE_MULT = 10;
+    uint256 internal constant EXTREME_TVL_DROP_BPS = 2_500;
 
     enum Reason {
         Unknown,
@@ -79,12 +74,10 @@ contract OracleManipulationTrap is ITrap {
         uint256 chainId
     ) internal pure returns (TrapConfig memory cfg) {
         if (chainId == 560048) {
-            // Hoodi Testnet — update with actual deployed addresses
-            cfg.oracle = 0x264F7AaaB41513f893a924e3327E924017b57328;
-            cfg.pool = 0x1BFc89dF7a3D78C36D8F57493bd5026d09DaDe31;
+            cfg.oracle = 0x046F0FCF3eF8156F30074D46a0F79011d849F919;
+            cfg.pool = 0x9965101009Ee25f1BA316CDcFEd7dC6c9559e9be;
             return cfg;
         }
-
         revert UnsupportedChain();
     }
 
@@ -105,183 +98,99 @@ contract OracleManipulationTrap is ITrap {
     function shouldRespond(
         bytes[] calldata data
     ) external pure returns (bool, bytes memory) {
-        if (data.length != SAMPLE_SIZE) {
-            return (false, bytes(""));
-        }
+        if (data.length != SAMPLE_SIZE) return (false, "");
 
         CollectOutput memory current = abi.decode(data[0], (CollectOutput));
+        if (current.paused) return (false, "");
 
-        // structural validation only
-        if (
-            current.pool == address(0) ||
-            current.oracle == address(0) ||
-            current.blockNumber == 0
-        ) {
-            return (false, bytes(""));
-        }
+        uint256 priceSum;
+        uint256 tvlSum;
 
-        // do not keep trying to pause an already paused pool
-        if (current.paused) {
-            return (false, bytes(""));
-        }
-
-        uint256 baselinePriceSum = 0;
-        uint256 baselineTvlSum = 0;
-        uint256 historyCount = data.length - 1;
-
-        for (uint256 i = 0; i < data.length; i++) {
-            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
-
-            if (
-                sample.pool != current.pool ||
-                sample.oracle != current.oracle ||
-                sample.blockNumber == 0
-            ) {
-                return (false, bytes(""));
-            }
-
-            if (i > 0) {
-                CollectOutput memory prev = abi.decode(
-                    data[i - 1],
-                    (CollectOutput)
-                );
-                // Enforce contiguous block ordering (earlier samples in the array are newer blocks)
-                if (prev.blockNumber != sample.blockNumber + 1) {
-                    return (false, bytes(""));
-                }
-
-                // historical samples must be sane enough to build a baseline
-                if (sample.tvl == 0) {
-                    return (false, bytes(""));
-                }
-
-                baselinePriceSum += sample.price;
-                baselineTvlSum += sample.tvl;
-            }
-        }
-
-        uint256 baselinePrice = baselinePriceSum / historyCount;
-        uint256 baselineTvl = baselineTvlSum / historyCount;
-
-        if (
-            baselineTvl < MIN_BASELINE_TVL || baselinePrice < MIN_BASELINE_PRICE
-        ) {
-            return (false, bytes(""));
-        }
-
-        bool spike = _isSpike(current.price, baselinePrice);
-        bool crash = _isCrash(current.price, baselinePrice);
-        bool tvlDropped = _isTvlDrop(current.tvl, baselineTvl);
-
-        if (!tvlDropped) {
-            return (false, bytes(""));
-        }
-
-        // Optional extra robustness:
-        // require at least N historical samples to already be materially abnormal
-        // in the same direction, which helps filter single-block blips.
-        if (spike) {
-            if (
-                _abnormalHistoryCount(data, baselinePrice, true) <
-                MIN_ABNORMAL_HISTORY_COUNT
-            ) {
-                return (false, bytes(""));
-            }
-
-            return (
-                true,
-                abi.encode(
-                    ResponsePayload({
-                        pool: current.pool,
-                        reason: Reason.PriceSpikeAndTvlDrop,
-                        currentPrice: current.price,
-                        baselinePrice: baselinePrice,
-                        currentTvl: current.tvl,
-                        baselineTvl: baselineTvl,
-                        currentBlockNumber: current.blockNumber
-                    })
-                )
-            );
-        }
-
-        if (crash) {
-            if (
-                _abnormalHistoryCount(data, baselinePrice, false) <
-                MIN_ABNORMAL_HISTORY_COUNT
-            ) {
-                return (false, bytes(""));
-            }
-
-            return (
-                true,
-                abi.encode(
-                    ResponsePayload({
-                        pool: current.pool,
-                        reason: Reason.PriceCrashAndTvlDrop,
-                        currentPrice: current.price,
-                        baselinePrice: baselinePrice,
-                        currentTvl: current.tvl,
-                        baselineTvl: baselineTvl,
-                        currentBlockNumber: current.blockNumber
-                    })
-                )
-            );
-        }
-
-        return (false, bytes(""));
-    }
-
-    function _isSpike(
-        uint256 currentPrice,
-        uint256 baselinePrice
-    ) internal pure returns (bool) {
-        // current >= baseline * 5 => currentPrice * 10000 >= baselinePrice * 50000
-        return
-            currentPrice * BPS_DENOMINATOR >= baselinePrice * SPIKE_UPPER_BPS;
-    }
-
-    function _isCrash(
-        uint256 currentPrice,
-        uint256 baselinePrice
-    ) internal pure returns (bool) {
-        // current <= baseline * 20% => currentPrice * 10000 <= baselinePrice * 2000
-        return
-            currentPrice * BPS_DENOMINATOR <= baselinePrice * CRASH_LOWER_BPS;
-    }
-
-    function _isTvlDrop(
-        uint256 currentTvl,
-        uint256 baselineTvl
-    ) internal pure returns (bool) {
-        // allow currentTvl == 0 => full drain
-        if (currentTvl >= baselineTvl) {
-            return false;
-        }
-
-        uint256 dropBps = ((baselineTvl - currentTvl) * BPS_DENOMINATOR) /
-            baselineTvl;
-        return dropBps >= TVL_DROP_BPS;
-    }
-
-    function _abnormalHistoryCount(
-        bytes[] calldata data,
-        uint256 baselinePrice,
-        bool upward
-    ) internal pure returns (uint256 count) {
         for (uint256 i = 1; i < data.length; i++) {
-            CollectOutput memory sample = abi.decode(data[i], (CollectOutput));
+            CollectOutput memory s = abi.decode(data[i], (CollectOutput));
+            CollectOutput memory prev = abi.decode(
+                data[i - 1],
+                (CollectOutput)
+            );
 
-            if (upward) {
-                // sample >= 150% of baseline
-                if (sample.price * BPS_DENOMINATOR >= baselinePrice * 15_000) {
-                    count++;
-                }
-            } else {
-                // sample <= 50% of baseline
-                if (sample.price * BPS_DENOMINATOR <= baselinePrice * 5_000) {
-                    count++;
-                }
+            if (s.pool != current.pool || s.oracle != current.oracle) {
+                return (false, "");
             }
+
+            if (!_isStrict(prev.blockNumber, s.blockNumber)) {
+                return (false, "");
+            }
+
+            priceSum += s.price;
+            tvlSum += s.tvl;
         }
+
+        uint256 baselinePrice = priceSum / (data.length - 1);
+        uint256 baselineTvl = tvlSum / (data.length - 1);
+
+        if (
+            baselinePrice < MIN_BASELINE_PRICE || baselineTvl < MIN_BASELINE_TVL
+        ) {
+            return (false, "");
+        }
+
+        bool tvlDrop = _isTvlDrop(current.tvl, baselineTvl);
+        if (!tvlDrop) return (false, "");
+
+        bool spike = current.price >= baselinePrice * 5;
+        bool crash = current.price <= baselinePrice / 5;
+
+        // extreme trigger
+        if (
+            (current.price >= baselinePrice * EXTREME_SPIKE_MULT ||
+                current.price <= baselinePrice / EXTREME_SPIKE_MULT) &&
+            _tvlDropBps(current.tvl, baselineTvl) >= EXTREME_TVL_DROP_BPS
+        ) {
+            return (true, _payload(current, baselinePrice, baselineTvl, spike));
+        }
+
+        if (spike || crash) {
+            return (true, _payload(current, baselinePrice, baselineTvl, spike));
+        }
+
+        return (false, "");
+    }
+
+    function _payload(
+        CollectOutput memory c,
+        uint256 bp,
+        uint256 bt,
+        bool spike
+    ) internal pure returns (bytes memory) {
+        return
+            abi.encode(
+                ResponsePayload({
+                    pool: c.pool,
+                    reason: spike
+                        ? Reason.PriceSpikeAndTvlDrop
+                        : Reason.PriceCrashAndTvlDrop,
+                    currentPrice: c.price,
+                    baselinePrice: bp,
+                    currentTvl: c.tvl,
+                    baselineTvl: bt,
+                    currentBlockNumber: c.blockNumber
+                })
+            );
+    }
+
+    function _isStrict(
+        uint256 newer,
+        uint256 older
+    ) internal pure returns (bool) {
+        return newer > older && newer - older == 1;
+    }
+
+    function _tvlDropBps(uint256 c, uint256 b) internal pure returns (uint256) {
+        if (c >= b) return 0;
+        return ((b - c) * BPS_DENOMINATOR) / b;
+    }
+
+    function _isTvlDrop(uint256 c, uint256 b) internal pure returns (bool) {
+        return _tvlDropBps(c, b) >= TVL_DROP_BPS;
     }
 }

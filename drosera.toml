@@ -1,5 +1,5 @@
 RPC_URL = "https://ethereum-hoodi-rpc.publicnode.com"
-drosera_rpc = "https://relay.hoodi.drosera.io"
+DROSERA_RPC_URL = "https://relay.hoodi.drosera.io"
 
 eth_chain_id = 560048
 drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
@@ -7,7 +7,8 @@ drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 [traps.oracle_guard]
 path = "out/OracleManipulationTrap.sol/OracleManipulationTrap.json"
 
-response_contract = "0x8185581d9E8446d7727DFd600848C19D6d663E17"
+# ✅ UPDATED responder (new deployment)
+response_contract = "0x533435C16e2d59A4EE3B5E807C22a4716B6285C8"
 
 response_function = "executeResponse(bytes)"
 

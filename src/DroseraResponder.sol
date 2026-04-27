@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-interface IPoolEmergency {
+interface IPausablePool {
     function emergencyPause() external;
 
     function paused() external view returns (bool);
@@ -29,51 +29,30 @@ contract DroseraResponder is Ownable {
     address public relayer;
     mapping(address => bool) public approvedPools;
 
-    event RelayerUpdated(
-        address indexed oldRelayer,
-        address indexed newRelayer
-    );
-    event PoolApprovalUpdated(address indexed pool, bool approved);
     event ResponseExecuted(
-        address indexed pool,
-        Reason indexed reason,
+        address pool,
+        Reason reason,
         uint256 currentPrice,
-        uint256 baselinePrice,
-        uint256 currentTvl,
-        uint256 baselineTvl,
-        uint256 currentBlockNumber
+        uint256 currentTvl
     );
-
-    constructor(
-        address initialOwner,
-        address initialRelayer,
-        address initialPool
-    ) Ownable(initialOwner) {
-        require(initialOwner != address(0), "zero owner");
-        require(initialRelayer != address(0), "zero relayer");
-        require(initialPool != address(0), "zero pool");
-
-        relayer = initialRelayer;
-        approvedPools[initialPool] = true;
-
-        emit PoolApprovalUpdated(initialPool, true);
-    }
 
     modifier onlyRelayer() {
         require(msg.sender == relayer, "not relayer");
         _;
     }
 
+    constructor(address owner_, address relayer_) Ownable(owner_) {
+        require(relayer_ != address(0), "zero relayer");
+        relayer = relayer_;
+    }
+
     function setRelayer(address newRelayer) external onlyOwner {
         require(newRelayer != address(0), "zero relayer");
-        emit RelayerUpdated(relayer, newRelayer);
         relayer = newRelayer;
     }
 
     function setApprovedPool(address pool, bool approved) external onlyOwner {
-        require(pool != address(0), "zero pool");
         approvedPools[pool] = approved;
-        emit PoolApprovalUpdated(pool, approved);
     }
 
     function executeResponse(bytes calldata rawPayload) external onlyRelayer {
@@ -82,23 +61,25 @@ contract DroseraResponder is Ownable {
             (ResponsePayload)
         );
 
-        require(payload.pool != address(0), "zero pool");
         require(approvedPools[payload.pool], "pool not approved");
 
-        if (IPoolEmergency(payload.pool).paused()) {
-            return;
-        }
+        require(
+            payload.reason == Reason.PriceSpikeAndTvlDrop ||
+                payload.reason == Reason.PriceCrashAndTvlDrop,
+            "invalid reason"
+        );
 
-        IPoolEmergency(payload.pool).emergencyPause();
+        IPausablePool pool = IPausablePool(payload.pool);
+
+        if (pool.paused()) return;
+
+        pool.emergencyPause();
 
         emit ResponseExecuted(
             payload.pool,
             payload.reason,
             payload.currentPrice,
-            payload.baselinePrice,
-            payload.currentTvl,
-            payload.baselineTvl,
-            payload.currentBlockNumber
+            payload.currentTvl
         );
     }
 }

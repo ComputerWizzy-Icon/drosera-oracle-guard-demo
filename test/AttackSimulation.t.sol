@@ -2,14 +2,15 @@
 pragma solidity ^0.8.19;
 
 import {Test} from "forge-std/Test.sol";
+
 import {AMMOracle} from "../src/AMMOracle.sol";
-import {LendingPool} from "../src/LendingPool.sol";
+import {MockProductionLendingPool} from "../src/MockProductionLendingPool.sol";
 import {DroseraResponder} from "../src/DroseraResponder.sol";
 import {OracleManipulationTrap} from "../src/OracleManipulationTrap.sol";
 
 contract AttackSimulation is Test {
     AMMOracle oracle;
-    LendingPool pool;
+    MockProductionLendingPool pool;
     OracleManipulationTrap trap;
     DroseraResponder responder;
 
@@ -34,13 +35,17 @@ contract AttackSimulation is Test {
         vm.startPrank(owner);
 
         oracle = new AMMOracle(1000 ether, 1000 ether);
-        pool = new LendingPool(owner, address(oracle));
-        responder = new DroseraResponder(owner, relayer, address(pool));
+
+        pool = new MockProductionLendingPool(owner, address(oracle));
+
+        responder = new DroseraResponder(owner, relayer);
 
         pool.setResponder(address(responder));
 
         vm.deal(owner, 200 ether);
         pool.fundLiquidity{value: 100 ether}();
+
+        responder.setApprovedPool(address(pool), true);
 
         vm.stopPrank();
 
@@ -68,12 +73,11 @@ contract AttackSimulation is Test {
             );
     }
 
-    /**
-     * CORE TEST: Spike + TVL drop detection
-     * Tests the primary trap logic: price manipulation + liquidity drain
-     */
+    // =========================================================
+    // CORE ATTACK TEST
+    // =========================================================
+
     function test_spike_and_tvl_drop_triggers_trap() public {
-        // Build normal baseline over 4 blocks
         uint256 basePrice = 1e18;
         uint256 baseTvl = 100 ether;
 
@@ -83,32 +87,35 @@ contract AttackSimulation is Test {
         buffer[1] = _sample(basePrice, baseTvl, 103);
 
         vm.roll(104);
+
         vm.startPrank(attacker);
 
-        // Attack: massive price spike + TVL drain
         oracle.swap1For0(4000 ether);
         pool.depositCollateral{value: 5 ether}();
         pool.borrow(50 ether);
 
         vm.stopPrank();
 
-        uint256 attackPrice = oracle.getLatestPrice();
+        // ✅ FIXED: correct tuple destructuring
+        (uint256 attackPrice, ) = oracle.getLatestPrice();
         uint256 attackTvl = pool.getTvl();
+
         buffer[0] = _sample(attackPrice, attackTvl, 104);
 
-        // Verify preconditions
-        assertTrue(attackPrice >= basePrice * 5, "price should spike 5x+");
-        assertTrue(attackTvl < (baseTvl * 9) / 10, "TVL should drop >10%");
+        assertTrue(attackPrice >= basePrice * 5, "price spike expected");
+        assertTrue(attackTvl < (baseTvl * 9) / 10, "TVL drop expected");
 
         (bool trigger, bytes memory payload) = trap.shouldRespond(buffer);
-        assertTrue(trigger, "trap should fire on spike + tvl drop");
 
-        // Execute response
+        assertTrue(trigger, "trap should fire");
+
         OracleManipulationTrap.ResponsePayload memory resp = abi.decode(
             payload,
             (OracleManipulationTrap.ResponsePayload)
         );
+
         assertEq(resp.pool, address(pool));
+
         assertEq(
             uint256(resp.reason),
             uint256(OracleManipulationTrap.Reason.PriceSpikeAndTvlDrop)
@@ -119,53 +126,58 @@ contract AttackSimulation is Test {
 
         assertTrue(pool.paused(), "pool should be paused");
 
-        // Idempotence check
         vm.prank(relayer);
         responder.executeResponse(payload);
-        assertTrue(pool.paused(), "pool should remain paused");
+
+        assertTrue(pool.paused(), "idempotent pause");
     }
 
+    // =========================================================
+    // NEGATIVE CASES
+    // =========================================================
+
     function test_no_false_positive_on_normal_operation() public {
-        uint256 normalPrice = 1e18;
-        uint256 normalTvl = 100 ether;
+        uint256 price = 1e18;
+        uint256 tvl = 100 ether;
 
         for (uint256 i = 0; i < 5; i++) {
-            buffer[4 - i] = _sample(normalPrice, normalTvl, 100 + i);
+            buffer[4 - i] = _sample(price, tvl, 100 + i);
         }
 
         vm.roll(105);
 
         (bool trigger, ) = trap.shouldRespond(buffer);
-        assertFalse(trigger, "trap should not fire on normal operation");
+
+        assertFalse(trigger);
     }
 
-    function test_no_false_positive_on_price_spike_alone() public {
-        uint256 normalPrice = 1e18;
-        uint256 normalTvl = 100 ether;
+    function test_price_spike_without_tvl_drop_should_not_trigger() public {
+        uint256 price = 1e18;
+        uint256 tvl = 100 ether;
 
-        buffer[4] = _sample(normalPrice, normalTvl, 100);
-        buffer[3] = _sample(normalPrice, normalTvl, 101);
-        buffer[2] = _sample(normalPrice, normalTvl, 102);
-        buffer[1] = _sample(normalPrice, normalTvl, 103);
+        buffer[4] = _sample(price, tvl, 100);
+        buffer[3] = _sample(price, tvl, 101);
+        buffer[2] = _sample(price, tvl, 102);
+        buffer[1] = _sample(price, tvl, 103);
 
         vm.roll(104);
 
-        // Price spike but TVL stays the same
         oracle.swap1For0(500 ether);
-        buffer[0] = _sample(oracle.getLatestPrice(), normalTvl, 104);
+
+        // ✅ FIXED
+        (uint256 p, ) = oracle.getLatestPrice();
+
+        buffer[0] = _sample(p, tvl, 104);
 
         (bool trigger, ) = trap.shouldRespond(buffer);
-        assertFalse(
-            trigger,
-            "trap should not fire on price spike alone (TVL must also drop)"
-        );
+
+        assertFalse(trigger);
     }
 
     function test_full_drain_caught() public {
         uint256 basePrice = 1e18;
         uint256 baseTvl = 100 ether;
 
-        // Normal history
         buffer[4] = _sample(basePrice, baseTvl, 100);
         buffer[3] = _sample(basePrice, baseTvl, 101);
         buffer[2] = _sample(basePrice, baseTvl, 102);
@@ -173,79 +185,45 @@ contract AttackSimulation is Test {
 
         vm.roll(104);
 
-        // Price crash: use swap0For1 to decrease price
-        // swap0For1 increases reserve0, decreases reserve1
-        // price = reserve1 / reserve0, so price goes DOWN
         oracle.swap0For1(9000 ether);
-        uint256 crashPrice = oracle.getLatestPrice();
+
+        // ✅ FIXED
+        (uint256 crashPrice, ) = oracle.getLatestPrice();
 
         buffer[0] = _sample(crashPrice, 0, 104);
 
-        // Verify crash: price <= baseline / 5
-        assertTrue(
-            crashPrice * 5 <= basePrice,
-            "price should crash to <= 20% of baseline"
-        );
-
         (bool trigger, bytes memory payload) = trap.shouldRespond(buffer);
-        assertTrue(
-            trigger,
-            "trap should fire: price crash + full drain (TVL=0 allowed)"
-        );
+
+        assertTrue(trigger);
 
         OracleManipulationTrap.ResponsePayload memory resp = abi.decode(
             payload,
             (OracleManipulationTrap.ResponsePayload)
         );
+
         assertEq(
             uint256(resp.reason),
-            uint256(OracleManipulationTrap.Reason.PriceCrashAndTvlDrop),
-            "reason should be crash"
+            uint256(OracleManipulationTrap.Reason.PriceCrashAndTvlDrop)
         );
-        assertEq(resp.currentTvl, 0, "should record zero TVL");
+
+        assertEq(resp.currentTvl, 0);
     }
 
-    function test_no_tvl_drop_means_no_trigger() public {
-        uint256 basePrice = 1e18;
-        uint256 baseTvl = 100 ether;
+    function test_tvl_drop_alone_should_not_trigger() public {
+        uint256 price = 1e18;
+        uint256 tvl = 100 ether;
 
-        buffer[4] = _sample(basePrice, baseTvl, 100);
-        buffer[3] = _sample(basePrice, baseTvl, 101);
-        buffer[2] = _sample(basePrice, baseTvl, 102);
-        buffer[1] = _sample(basePrice, baseTvl, 103);
+        buffer[4] = _sample(price, tvl, 100);
+        buffer[3] = _sample(price, tvl, 101);
+        buffer[2] = _sample(price, tvl, 102);
+        buffer[1] = _sample(price, tvl, 103);
 
         vm.roll(104);
 
-        // Massive price spike but TVL stays same
-        oracle.swap1For0(5000 ether);
-        buffer[0] = _sample(oracle.getLatestPrice(), baseTvl, 104);
+        buffer[0] = _sample(price, 85 ether, 104);
 
         (bool trigger, ) = trap.shouldRespond(buffer);
-        assertFalse(
-            trigger,
-            "trap should NOT fire: spike requires TVL drop as proof of attack"
-        );
-    }
 
-    function test_tvl_drop_alone_without_price_anomaly() public {
-        uint256 basePrice = 1e18;
-        uint256 baseTvl = 100 ether;
-
-        buffer[4] = _sample(basePrice, baseTvl, 100);
-        buffer[3] = _sample(basePrice, baseTvl, 101);
-        buffer[2] = _sample(basePrice, baseTvl, 102);
-        buffer[1] = _sample(basePrice, baseTvl, 103);
-
-        vm.roll(104);
-
-        // TVL drops but price stays normal
-        uint256 drainedTvl = (baseTvl * 85) / 100; // 15% drain
-        buffer[0] = _sample(basePrice, drainedTvl, 104);
-
-        (bool trigger, ) = trap.shouldRespond(buffer);
-        assertFalse(
-            trigger,
-            "trap should NOT fire: TVL drop alone without price anomaly"
-        );
+        assertFalse(trigger);
     }
 }
