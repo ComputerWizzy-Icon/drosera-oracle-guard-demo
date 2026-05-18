@@ -1,398 +1,193 @@
-# 🛡 Drosera Oracle Manipulation Guard (Production-Ready Demo)
+```md
+# Drosera Oracle Manipulation Guard
 
-A DeFi security monitoring system built on the **Drosera network** that detects **oracle manipulation + liquidity drain attacks** and automatically triggers protocol protection.
+A production-like Drosera demo that detects oracle manipulation combined with TVL drain and automatically pauses a vulnerable lending pool on Hoodi testnet.
 
-Deployed on **Hoodi Testnet (Chain ID: 560048)**  
-All contracts verified and fully test-covered (5/5 passing).
+## Overview
 
----
+This project models a composite DeFi attack where:
 
-## 🧠 Core Idea
+- an oracle price is manipulated sharply
+- protocol TVL drops materially
+- a Drosera Trap evaluates recent state samples
+- a relayer-gated Responder pauses the pool if the attack condition is confirmed
 
-This system protects a lending protocol from **composite DeFi attacks**:
+The demo is designed to be stricter than a toy mock:
 
-> Price manipulation alone is not enough.  
-> Liquidity drain alone is not enough.  
-> **Both together = confirmed attack.**
+- deployed addresses in the README match the Trap constants
+- `collect()` is tested end-to-end against real local mocks
+- oracle reads return both `price` and `updatedAt`
+- external reads in `collect()` are failure-safe
+- malformed sample data is rejected safely
+- relayer restrictions are explicit and tested
 
-It uses a **Drosera Trap + Responder architecture**:
+## Deployed Architecture
 
-- Samples 5 consecutive blocks
-- Builds baseline from previous 4 blocks
-- Detects abnormal price movement + TVL collapse
-- Requires operator consensus (Drosera network)
-- Automatically pauses the lending pool when attack is confirmed
+The production trap hardcodes the Hoodi addresses in `src/OracleManipulationTrap.sol`.
 
----
+| Contract | Address |
+|---|---|
+| AMMOracle | `0x1836A3Ef74CaD2e4089917EDE462ec056e1B2ddC` |
+| MockProductionLendingPool | `0x71dC74681c14FB5943790a2b11A4167EEAf42040` |
+| DroseraResponder | `0x96FAF4fe85b2bC67A805DFA88d4c6B17f7Dadb48` |
+| OracleManipulationTrap | `0x3b983cB787874E6e14a87cdbBBe868B9D471F885` |
 
-## 🏗 Deployed Architecture (Hoodi Testnet)
+If the oracle or pool is redeployed, `_configForChain()` in `src/OracleManipulationTrap.sol` must be updated and the Trap must be redeployed.
 
-### ✅ Live Contracts
+## Contract Roles
 
-| Contract                  | Address                                      |
-|--------------------------|----------------------------------------------|
-| AMMOracle                | `0x41b3616b40e50aD0f3d5e28E74c89325a4f4fFFf` |
-| MockProductionLendingPool| `0x5e7Eb055331905b1DA8e1aEA8F692E7F45074144` |
-| DroseraResponder         | `0x533435C16e2d59A4EE3B5E807C22a4716B6285C8` |
-| OracleManipulationTrap   | `0x26C8Dca81557EC11faDFDF1F8EF726aeBDf9CcBa` |
+`src/AMMOracle.sol`
 
----
+- exposes `getLatestPrice() -> (price, updatedAt)`
+- updates `lastUpdated` on swaps
+- provides freshness data for the pool and trap
 
-## 🔍 System Design
+`src/MockProductionLendingPool.sol`
 
----
+- models a production-like lending target
+- tracks collateral, borrows, pause state, and oracle freshness
+- exposes `getTvl()` using accounted liquidity minus borrows
 
-## 1. 📈 AMM Oracle (Price Engine)
+`src/OracleManipulationTrap.sol`
 
-A constant product AMM:
+- collects price, timestamp, TVL, pause state, block metadata, and read-success flags
+- validates sample shape and freshness
+- triggers only on price anomaly plus TVL collapse
 
-- `reserve0 * reserve1 = k`
-- Price = `reserve1 / reserve0`
+`src/TestableOracleManipulationTrap.sol`
 
-Supports:
+- allows local Foundry tests to exercise real `collect()` behavior
+- exists only for testing, not production deployment
 
-- `swap0For1()` → price increases
-- `swap1For0()` → price decreases
+`src/DroseraResponder.sol`
 
-Used to simulate real oracle manipulation attacks.
+- restricts execution to the configured relayer
+- validates approved pools and reasons
+- pauses the pool and emits a full response event
 
----
+## Detection Logic
 
-## 2. 🏦 Lending Pool (Target Protocol)
+The Trap evaluates a 5-sample window.
 
-`MockProductionLendingPool` is a production-grade lending simulation.
+Baseline is built from the previous 4 samples only:
 
-### Core mechanics:
-
-- ETH collateral lending system
-- Borrow limit:
-
+```text
+baselinePrice = average(samples[1..4].price)
+baselineTvl   = average(samples[1..4].tvl)
 ```
 
-maxBorrow = collateralValue × 75%
+The current sample is `data[0]`.
 
-```
+A response is rejected if any of the following is true:
 
-- TVL model:
+- sample count is wrong
+- sample encoding is malformed
+- any external read failed
+- oracle data is stale
+- pool/oracle identity changes across samples
+- block history is not strictly contiguous
+- pool is already paused
+- baseline values are too small
 
-```
+A response can trigger only if:
 
-getTvl() = accountedLiquidity - totalBorrows
-(minimum 0)
+- TVL drop is at least `10%`
+- price spikes to at least `5x` baseline, or crashes to at most `1/5x` baseline
 
-````
+An extreme path also exists for:
 
-- Interest accrual per block (WAD-based model)
+- price move of at least `10x` or at most `1/10x`
+- TVL drop of at least `25%`
 
----
+## Attack Flow
 
-### 🔐 Safety Systems
+A representative attack sequence is:
 
-- Oracle staleness protection (1 hour max)
-- ReentrancyGuard protection
-- Pausable via Drosera responder
-- Solvency checks on borrow + withdraw
-- Interest-index based debt tracking
-- Liquidity accounting correctness
+1. The attacker manipulates the AMM oracle.
+2. The manipulated oracle inflates or collapses the reported price.
+3. The attacker borrows aggressively against the distorted valuation.
+4. Pool TVL falls sharply.
+5. Drosera operators evaluate the Trap’s recent samples.
+6. The Trap returns `(true, payload)` when both price anomaly and TVL drain are confirmed.
+7. The configured relayer calls `executeResponse(bytes)`.
+8. The Responder pauses the pool.
 
----
+This means:
 
-## 3. 🚨 Drosera Responder (Execution Layer)
+- price manipulation alone is not enough
+- TVL loss alone is not enough
+- both conditions together are treated as the actionable signal
 
-Handles confirmed attack responses from Drosera relayer.
+## Drosera Config
 
-### Flow:
-
-1. Receives encoded payload
-2. Validates:
-   - Pool is approved
-   - Reason is valid attack type
-3. Executes:
-
-```solidity
-pool.emergencyPause();
-````
-
----
-
-### Response Payload
-
-```solidity
-struct ResponsePayload {
-    address pool;
-    Reason reason;
-    uint256 currentPrice;
-    uint256 baselinePrice;
-    uint256 currentTvl;
-    uint256 baselineTvl;
-    uint256 currentBlockNumber;
-}
-```
-
----
-
-### Attack Reasons
-
-* PriceSpikeAndTvlDrop
-* PriceCrashAndTvlDrop
-
----
-
-### Design Properties
-
-* Idempotent execution (safe replay resistant)
-* Relayer-restricted execution
-* Pool whitelist enforcement
-* Emergency-only control path
-
----
-
-## 4. 🧠 Oracle Manipulation Trap (Core Engine)
-
-This is the **security brain** of the system.
-
----
-
-## 📦 Data Collection
-
-Each snapshot:
-
-```solidity
-struct CollectOutput {
-    address pool;
-    address oracle;
-    uint256 price;
-    uint256 tvl;
-    bool paused;
-    uint256 blockNumber;
-}
-```
-
----
-
-## 📊 Baseline Logic (Critical Design)
-
-Uses last 4 blocks:
-
-```
-baselinePrice = avg(block[1..4].price)
-baselineTvl   = avg(block[1..4].tvl)
-```
-
-✔ Current block excluded intentionally
-✔ Strict 5-block sliding window validation
-
----
-
-## 🚨 Trigger Conditions
-
-All must be true:
-
----
-
-### 1. TVL Drop (Mandatory)
-
-```
-TVL drop ≥ 10%
-```
-
----
-
-### 2. Price Anomaly
-
-Either:
-
-#### Spike:
-
-```
-currentPrice ≥ baseline × 5
-```
-
-#### Crash:
-
-```
-currentPrice ≤ baseline ÷ 5
-```
-
----
-
-### 3. Strict Block Continuity
-
-```
-block[i] = block[i-1] + 1
-```
-
-No gaps allowed.
-
----
-
-### 4. Baseline Safety
-
-Reject if:
-
-* baselinePrice < 1e12
-* baselineTvl < 1 ether
-
----
-
-### 5. Extreme Detection Path
-
-Early trigger if:
-
-* ≥10x price spike/crash
-* ≥25% TVL drop
-
----
-
-## 🧾 Response Output
-
-When triggered:
-
-```solidity
-return (true, abi.encode(ResponsePayload));
-```
-
----
-
-## 🧪 Attack Simulation (Tested Scenario)
-
-### Normal state:
-
-```
-price = 1e18
-tvl = 100 ETH
-```
-
----
-
-### Attack:
-
-```solidity
-oracle.swap1For0(4000 ether);
-pool.borrow(50 ether);
-```
-
----
-
-### Result:
-
-```
-price spikes
-TVL drops
-```
-
----
-
-### Detection Chain:
-
-* Price anomaly ✔
-* TVL drop ✔
-* Clean history ✔
-
-➡ Trap triggers
-
----
-
-### Response Flow:
-
-```
-Drosera consensus (3 operators)
-        ↓
-DroseraResponder.executeResponse()
-        ↓
-LendingPool.emergencyPause()
-```
-
----
-
-## 🧪 Test Coverage (5/5 PASSING)
-
-* ✔ Spike + TVL drop triggers trap
-* ✔ Crash + drain triggers trap
-* ✔ Spike alone rejected
-* ✔ TVL drop alone rejected
-* ✔ Normal operation passes safely
-
----
-
-## 🔧 Deployment Flow
-
-1. Deploy AMMOracle
-2. Deploy Lending Pool
-3. Fund liquidity (0.05 ETH)
-4. Deploy Responder
-5. Link responder → pool
-6. Deploy Trap
-7. Configure Drosera network
-
----
-
-## 📡 Drosera Config (UPDATED)
+Use the following `drosera.toml`:
 
 ```toml
-block_sample_size = 5
-cooldown_period_blocks = 1
+ethereum_rpc = "https://ethereum-hoodi-rpc.publicnode.com"
+drosera_rpc = "https://relay.hoodi.drosera.io"
+eth_chain_id = 560048
+drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 
+[traps.oracle_guard]
+path = "out/OracleManipulationTrap.sol/OracleManipulationTrap.json"
+response_contract = "0x96FAF4fe85b2bC67A805DFA88d4c6B17f7Dadb48"
+response_function = "executeResponse(bytes)"
+block_sample_size = 5
+cooldown_period_blocks = 20
 min_number_of_operators = 3
 max_number_of_operators = 7
-
-response_function = "executeResponse(bytes)"
-response_contract = "0x533435C16e2d59A4EE3B5E807C22a4716B6285C8"
-
 private_trap = false
 whitelist = []
 ```
 
----
+## Cooldown
 
-## 🔐 Key Design Decisions
+`cooldown_period_blocks = 20` is the mock-production default.
 
-### ✔ Correctness
+A cooldown of `1` may be useful for fast testnet demos, but it should be marked as testnet-only because it can cause repeated response attempts while the condition remains true.
 
-* Baseline excludes current block
-* Strict contiguous history validation
-* TVL floor protection for stable baselines
+## Relayer Assumption
 
-### ✔ Security Model
+The responder requires the actual onchain caller to match its configured `relayer` address.
 
-* Price alone cannot trigger response
-* TVL drop is mandatory condition
-* Multi-condition anomaly detection
+That relayer should be the operator-side EOA that submits `executeResponse(bytes)`, not the seed-node URL `https://relay.hoodi.drosera.io`.
 
-### ✔ Decentralization
+If the relayer is configured incorrectly:
 
-* 3+ operator consensus
-* Relayer-separated execution layer
-* No centralized trigger authority
+- the Trap can still detect correctly
+- response execution will revert with `not relayer`
 
-### ✔ Safety
+Current deployed responder:
 
-* Idempotent responder
-* Pool approval gating
-* Replay-safe execution
+```text
+Responder: 0x96FAF4fe85b2bC67A805DFA88d4c6B17f7Dadb48
+Relayer: the operator EOA that actually submits executeResponse(bytes)
+```
 
----
+## Tests
 
-## ⚠️ Limitations
+`test/Attack.t.sol` covers:
 
-* No real liquidation engine yet
-* Single oracle (AMM-based only)
-* No TWAP / time-weighted pricing
-* Simplified lending model
+- real `collect()` decoding against local mocks
+- malformed sample handling without revert
+- spike plus TVL-drop detection
+- crash plus TVL-drop detection
+- no false positive on normal operation
+- relayer failure on wrong caller and success on correct caller
 
----
+Current local result:
 
-## 🚀 Roadmap
+```text
+8 tests passed, 0 failed
+```
 
-* Chainlink / Pyth oracle integration
-* Multi-oracle consensus system
-* Full liquidation engine
-* MEV-resistant oracle layer
-* Cross-chain deployment
-* Operator slashing system
+Run locally with:
 
----
+```bash
+forge test -vvv
+```
 
-## 🧠 One-line Summary
+## Summary
 
-A decentralized DeFi security system that detects oracle manipulation and liquidity drains in real time, and autonomously pauses vulnerable lending pools using Drosera consensus.
+This repository demonstrates a production-like Drosera monitoring pattern for DeFi security: detect combined oracle manipulation and liquidity drain conditions, then pause the vulnerable pool through a relayer-gated response path.
+```

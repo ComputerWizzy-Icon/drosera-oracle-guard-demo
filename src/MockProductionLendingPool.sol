@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -23,14 +23,10 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
     IStaleCheckedOracle public immutable ORACLE;
 
     address public responder;
-
     uint256 public maxOracleStaleness = 1 hours;
-
     uint256 public borrowRatePerBlockWad = 1e12;
-
     uint256 public lastAccrualBlock;
     uint256 public borrowIndex = WAD;
-
     uint256 public totalCollateral;
     uint256 public totalBorrows;
     uint256 public totalBadDebt;
@@ -43,13 +39,11 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
     event ResponderUpdated(address indexed responder);
     event OracleStalenessUpdated(uint256 maxOracleStaleness);
     event BorrowRateUpdated(uint256 borrowRatePerBlockWad);
-
     event LiquidityFunded(address indexed sender, uint256 amount);
     event CollateralDeposited(address indexed user, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 price);
     event Repaid(address indexed user, uint256 amount, uint256 refund);
     event CollateralWithdrawn(address indexed user, uint256 amount);
-
     event EmergencyPaused(address indexed responder);
     event EmergencyUnpaused(address indexed owner);
 
@@ -113,7 +107,6 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         require(amount <= accountedLiquidity, "insufficient liquidity");
 
         uint256 price = _freshPrice();
-
         uint256 newDebt = debtPrincipal[msg.sender] + amount;
         require(
             _isSolventWithDebt(msg.sender, newDebt, price),
@@ -193,10 +186,6 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         emit EmergencyUnpaused(msg.sender);
     }
 
-    // =========================================================
-    // 🔥 FIXED TVL (REAL ECONOMIC MODEL)
-    // =========================================================
-
     function getAvailableLiquidity() external view returns (uint256) {
         return accountedLiquidity;
     }
@@ -208,10 +197,6 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         return accountedLiquidity - totalBorrows;
     }
 
-    // =========================================================
-    // INTERNALS
-    // =========================================================
-
     function _accrueInterest() internal {
         if (block.number == lastAccrualBlock) return;
 
@@ -222,12 +207,10 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
 
         uint256 blocksElapsed = block.number - lastAccrualBlock;
         uint256 interestFactor = borrowRatePerBlockWad * blocksElapsed;
-
         uint256 interestAccrued = (totalBorrows * interestFactor) / WAD;
 
         totalBorrows += interestAccrued;
         borrowIndex += (borrowIndex * interestFactor) / WAD;
-
         lastAccrualBlock = block.number;
     }
 
@@ -240,7 +223,9 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         }
 
         uint256 userIndex = userBorrowIndex[user];
-        if (userIndex == 0) userIndex = WAD;
+        if (userIndex == 0) {
+            userIndex = WAD;
+        }
 
         debtPrincipal[user] = (principal * borrowIndex) / userIndex;
         userBorrowIndex[user] = borrowIndex;
@@ -273,7 +258,6 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         uint256 collateralValue = (collateral[user] * price) / WAD;
         uint256 maxBorrow = (collateralValue * COLLATERAL_FACTOR_BPS) /
             BPS_DENOMINATOR;
-
         return debt <= maxBorrow;
     }
 }

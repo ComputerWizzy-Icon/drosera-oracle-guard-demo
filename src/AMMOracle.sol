@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
 contract AMMOracle {
     uint256 public reserve0;
@@ -30,14 +30,11 @@ contract AMMOracle {
 
         uint256 newReserve0 = reserve0 + amount0In;
         uint256 k = reserve0 * reserve1;
-
         uint256 newReserve1 = k / newReserve0;
-
         uint256 amount1Out = reserve1 - newReserve1;
 
         reserve0 = newReserve0;
         reserve1 = newReserve1;
-
         lastUpdated = block.timestamp;
 
         emit Swap0For1(amount0In, amount1Out);
@@ -48,14 +45,11 @@ contract AMMOracle {
 
         uint256 newReserve1 = reserve1 + amount1In;
         uint256 k = reserve0 * reserve1;
-
         uint256 newReserve0 = k / newReserve1;
-
         uint256 amount0Out = reserve0 - newReserve0;
 
         reserve1 = newReserve1;
         reserve0 = newReserve0;
-
         lastUpdated = block.timestamp;
 
         emit Swap1For0(amount1In, amount0Out);
