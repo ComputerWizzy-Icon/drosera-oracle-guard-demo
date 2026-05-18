@@ -1,4 +1,3 @@
-```md
 # Drosera Oracle Manipulation Guard
 
 A production-like Drosera demo that detects oracle manipulation combined with TVL drain and automatically pauses a vulnerable lending pool on Hoodi testnet.
@@ -190,4 +189,3 @@ forge test -vvv
 ## Summary
 
 This repository demonstrates a production-like Drosera monitoring pattern for DeFi security: detect combined oracle manipulation and liquidity drain conditions, then pause the vulnerable pool through a relayer-gated response path.
-```
