@@ -108,6 +108,7 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
 
         uint256 price = _freshPrice();
         uint256 newDebt = debtPrincipal[msg.sender] + amount;
+
         require(
             _isSolventWithDebt(msg.sender, newDebt, price),
             "exceeds borrow power"
@@ -190,11 +191,44 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         return accountedLiquidity;
     }
 
+    /// @notice Kept for compatibility. Prefer getRiskMetrics().
     function getTvl() external view returns (uint256) {
-        if (accountedLiquidity < totalBorrows) {
-            return 0;
+        return _totalAssets();
+    }
+
+    /// @notice Better accounting surface for the Trap.
+    /// availableLiquidity = immediately drainable liquidity
+    /// totalAssets = cash + borrows - bad debt
+    /// utilizationBps = borrows / totalAssets
+    function getRiskMetrics()
+        external
+        view
+        returns (
+            uint256 availableLiquidity,
+            uint256 totalBorrowed,
+            uint256 totalCollat,
+            uint256 badDebt,
+            uint256 utilizationBps,
+            uint256 totalAssets
+        )
+    {
+        availableLiquidity = accountedLiquidity;
+        totalBorrowed = totalBorrows;
+        totalCollat = totalCollateral;
+        badDebt = totalBadDebt;
+        totalAssets = _totalAssets();
+
+        if (totalAssets == 0) {
+            utilizationBps = totalBorrowed > 0 ? type(uint256).max : 0;
+        } else {
+            utilizationBps = (totalBorrowed * BPS_DENOMINATOR) / totalAssets;
         }
-        return accountedLiquidity - totalBorrows;
+    }
+
+    function _totalAssets() internal view returns (uint256) {
+        uint256 grossAssets = accountedLiquidity + totalBorrows;
+        if (totalBadDebt >= grossAssets) return 0;
+        return grossAssets - totalBadDebt;
     }
 
     function _accrueInterest() internal {
@@ -258,6 +292,7 @@ contract MockProductionLendingPool is Ownable, Pausable, ReentrancyGuard {
         uint256 collateralValue = (collateral[user] * price) / WAD;
         uint256 maxBorrow = (collateralValue * COLLATERAL_FACTOR_BPS) /
             BPS_DENOMINATOR;
+
         return debt <= maxBorrow;
     }
 }

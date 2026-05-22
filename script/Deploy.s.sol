@@ -11,8 +11,6 @@ import {OracleManipulationTrap} from "../src/OracleManipulationTrap.sol";
 contract Deploy is Script {
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");
-        // This must be the operator-side EOA that actually submits executeResponse(bytes),
-        // not the Drosera seed-node URL.
         address relayer = vm.envAddress("RELAYER_ADDRESS");
 
         vm.startBroadcast(pk);
@@ -26,9 +24,13 @@ contract Deploy is Script {
         );
         pool.fundLiquidity{value: 0.05 ether}();
 
-        DroseraResponder responder = new DroseraResponder(deployer, relayer);
-        pool.setResponder(address(responder));
+        DroseraResponder responder = new DroseraResponder(
+            deployer,
+            relayer,
+            20
+        );
         responder.setApprovedPool(address(pool), true);
+        pool.setResponder(address(responder));
 
         OracleManipulationTrap trap = new OracleManipulationTrap();
 

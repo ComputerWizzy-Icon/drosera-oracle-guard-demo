@@ -10,6 +10,11 @@ import {OracleManipulationTrap} from "../src/OracleManipulationTrap.sol";
 import {TestableOracleManipulationTrap} from "../src/TestableOracleManipulationTrap.sol";
 
 contract AttackSimulation is Test {
+    uint256 internal constant REASON_PRICE_SPIKE_AND_LIQUIDITY_DROP = 1;
+    uint256 internal constant REASON_PRICE_CRASH_AND_LIQUIDITY_DROP = 2;
+    uint256 internal constant REASON_READ_FAILURE_ALERT_ONLY = 3;
+    uint256 internal constant REASON_STALE_ORACLE_ALERT_ONLY = 4;
+
     AMMOracle internal oracle;
     MockProductionLendingPool internal pool;
     OracleManipulationTrap internal trap;
@@ -22,18 +27,23 @@ contract AttackSimulation is Test {
     bytes[] internal buffer;
 
     struct CollectOutput {
-        uint8 schemaVersion;
+        uint256 schemaVersion;
         address pool;
         address oracle;
         uint256 price;
         uint256 oracleUpdatedAt;
-        uint256 tvl;
-        bool paused;
+        uint256 availableLiquidity;
+        uint256 totalBorrows;
+        uint256 totalCollateral;
+        uint256 totalBadDebt;
+        uint256 utilizationBps;
+        uint256 totalAssets;
+        uint256 paused;
         uint256 blockNumber;
         uint256 blockTimestamp;
-        bool oracleReadOk;
-        bool tvlReadOk;
-        bool pausedReadOk;
+        uint256 oracleReadOk;
+        uint256 metricsReadOk;
+        uint256 pausedReadOk;
     }
 
     function setUp() public {
@@ -43,14 +53,13 @@ contract AttackSimulation is Test {
 
         oracle = new AMMOracle(1000 ether, 1000 ether);
         pool = new MockProductionLendingPool(owner, address(oracle));
-        responder = new DroseraResponder(owner, relayer);
+        responder = new DroseraResponder(owner, relayer, 20);
 
+        responder.setApprovedPool(address(pool), true);
         pool.setResponder(address(responder));
 
         vm.deal(owner, 200 ether);
         pool.fundLiquidity{value: 100 ether}();
-
-        responder.setApprovedPool(address(pool), true);
 
         vm.stopPrank();
 
@@ -63,10 +72,19 @@ contract AttackSimulation is Test {
     function _sample(
         uint256 price,
         uint256 oracleUpdatedAt,
-        uint256 tvl,
+        uint256 availableLiquidity,
         uint256 blk,
         uint256 ts
     ) internal view returns (bytes memory) {
+        (
+            ,
+            uint256 totalBorrowed,
+            uint256 totalCollat,
+            uint256 badDebt,
+            uint256 utilizationBps,
+            uint256 totalAssets
+        ) = pool.getRiskMetrics();
+
         return
             abi.encode(
                 CollectOutput({
@@ -75,13 +93,18 @@ contract AttackSimulation is Test {
                     oracle: address(oracle),
                     price: price,
                     oracleUpdatedAt: oracleUpdatedAt,
-                    tvl: tvl,
-                    paused: pool.paused(),
+                    availableLiquidity: availableLiquidity,
+                    totalBorrows: totalBorrowed,
+                    totalCollateral: totalCollat,
+                    totalBadDebt: badDebt,
+                    utilizationBps: utilizationBps,
+                    totalAssets: totalAssets,
+                    paused: pool.paused() ? 1 : 0,
                     blockNumber: blk,
                     blockTimestamp: ts,
-                    oracleReadOk: true,
-                    tvlReadOk: true,
-                    pausedReadOk: true
+                    oracleReadOk: 1,
+                    metricsReadOk: 1,
+                    pausedReadOk: 1
                 })
             );
     }
@@ -102,25 +125,30 @@ contract AttackSimulation is Test {
         assertEq(out.pool, address(pool));
         assertEq(out.oracle, address(oracle));
         assertEq(out.price, 1e18);
-        assertEq(out.tvl, 100 ether);
-        assertFalse(out.paused);
+        assertEq(out.availableLiquidity, 100 ether);
+        assertEq(out.totalBorrows, 0);
+        assertEq(out.totalCollateral, 0);
+        assertEq(out.totalBadDebt, 0);
+        assertEq(out.utilizationBps, 0);
+        assertEq(out.totalAssets, 100 ether);
+        assertEq(out.paused, 0);
         assertEq(out.blockNumber, 123);
         assertEq(out.blockTimestamp, 1_000_000);
-        assertTrue(out.oracleReadOk);
-        assertTrue(out.tvlReadOk);
-        assertTrue(out.pausedReadOk);
+        assertEq(out.oracleReadOk, 1);
+        assertEq(out.metricsReadOk, 1);
+        assertEq(out.pausedReadOk, 1);
         assertGt(out.oracleUpdatedAt, 0);
     }
 
-    function test_spike_and_tvl_drop_triggers_trap() public {
+    function test_spike_and_liquidity_drop_triggers_trap() public {
         uint256 basePrice = 1e18;
-        uint256 baseTvl = 100 ether;
+        uint256 baseLiquidity = 100 ether;
         uint256 ts = block.timestamp;
 
-        buffer[4] = _sample(basePrice, ts, baseTvl, 100, ts);
-        buffer[3] = _sample(basePrice, ts, baseTvl, 101, ts + 12);
-        buffer[2] = _sample(basePrice, ts, baseTvl, 102, ts + 24);
-        buffer[1] = _sample(basePrice, ts, baseTvl, 103, ts + 36);
+        buffer[4] = _sample(basePrice, ts, baseLiquidity, 100, ts);
+        buffer[3] = _sample(basePrice, ts, baseLiquidity, 101, ts + 12);
+        buffer[2] = _sample(basePrice, ts, baseLiquidity, 102, ts + 24);
+        buffer[1] = _sample(basePrice, ts, baseLiquidity, 103, ts + 36);
 
         vm.roll(104);
         vm.warp(ts + 48);
@@ -132,18 +160,21 @@ contract AttackSimulation is Test {
         vm.stopPrank();
 
         (uint256 attackPrice, uint256 updatedAt) = oracle.getLatestPrice();
-        uint256 attackTvl = pool.getTvl();
+        (uint256 attackLiquidity, , , , , ) = pool.getRiskMetrics();
 
         buffer[0] = _sample(
             attackPrice,
             updatedAt,
-            attackTvl,
+            attackLiquidity,
             104,
             block.timestamp
         );
 
         assertTrue(attackPrice >= basePrice * 5, "price spike expected");
-        assertTrue(attackTvl < (baseTvl * 9) / 10, "TVL drop expected");
+        assertTrue(
+            attackLiquidity < (baseLiquidity * 9) / 10,
+            "liquidity drop expected"
+        );
 
         (bool trigger, bytes memory payload) = trap.shouldRespond(buffer);
         assertTrue(trigger, "trap should fire");
@@ -154,23 +185,22 @@ contract AttackSimulation is Test {
         );
 
         assertEq(resp.pool, address(pool));
-        assertEq(
-            uint256(resp.reason),
-            uint256(OracleManipulationTrap.Reason.PriceSpikeAndTvlDrop)
-        );
+        assertEq(resp.reason, REASON_PRICE_SPIKE_AND_LIQUIDITY_DROP);
 
         vm.prank(relayer);
         responder.executeResponse(payload);
 
         assertTrue(pool.paused(), "pool should be paused");
+        assertEq(responder.responseCount(), 1);
 
         vm.prank(relayer);
         responder.executeResponse(payload);
 
         assertTrue(pool.paused(), "idempotent pause");
+        assertEq(responder.responseCount(), 1);
     }
 
-    function test_malformed_data_does_not_revert() public {
+    function test_malformed_data_does_not_revert() public view {
         bytes[] memory malformed = new bytes[](5);
 
         malformed[0] = hex"1234";
@@ -185,17 +215,80 @@ contract AttackSimulation is Test {
         assertEq(payload.length, 0);
     }
 
+    function test_should_alert_on_stale_oracle() public {
+        bytes[] memory samples = new bytes[](1);
+        uint256 price = 1e18;
+        uint256 staleUpdatedAt = 1;
+        uint256 liquidity = 100 ether;
+        uint256 staleSampleTime = staleUpdatedAt + 1 hours + 1;
+
+        samples[0] = _sample(
+            price,
+            staleUpdatedAt,
+            liquidity,
+            100,
+            staleSampleTime
+        );
+
+        (bool alerting, bytes memory payload) = trap.shouldAlert(samples);
+        assertTrue(alerting);
+
+        OracleManipulationTrap.ResponsePayload memory resp = abi.decode(
+            payload,
+            (OracleManipulationTrap.ResponsePayload)
+        );
+
+        assertEq(resp.reason, REASON_STALE_ORACLE_ALERT_ONLY);
+        assertEq(resp.currentLiquidity, liquidity);
+    }
+
+    function test_should_alert_on_read_failure() public {
+        bytes[] memory samples = new bytes[](1);
+
+        samples[0] = abi.encode(
+            CollectOutput({
+                schemaVersion: 1,
+                pool: address(pool),
+                oracle: address(oracle),
+                price: 0,
+                oracleUpdatedAt: 0,
+                availableLiquidity: 0,
+                totalBorrows: 0,
+                totalCollateral: 0,
+                totalBadDebt: 0,
+                utilizationBps: 0,
+                totalAssets: 0,
+                paused: 0,
+                blockNumber: 100,
+                blockTimestamp: 200,
+                oracleReadOk: 0,
+                metricsReadOk: 1,
+                pausedReadOk: 1
+            })
+        );
+
+        (bool alerting, bytes memory payload) = trap.shouldAlert(samples);
+        assertTrue(alerting);
+
+        OracleManipulationTrap.ResponsePayload memory resp = abi.decode(
+            payload,
+            (OracleManipulationTrap.ResponsePayload)
+        );
+
+        assertEq(resp.reason, REASON_READ_FAILURE_ALERT_ONLY);
+    }
+
     function test_response_wrong_relayer_fails_correct_relayer_succeeds()
         public
     {
         uint256 basePrice = 1e18;
-        uint256 baseTvl = 100 ether;
+        uint256 baseLiquidity = 100 ether;
         uint256 ts = block.timestamp;
 
-        buffer[4] = _sample(basePrice, ts, baseTvl, 100, ts);
-        buffer[3] = _sample(basePrice, ts, baseTvl, 101, ts + 12);
-        buffer[2] = _sample(basePrice, ts, baseTvl, 102, ts + 24);
-        buffer[1] = _sample(basePrice, ts, baseTvl, 103, ts + 36);
+        buffer[4] = _sample(basePrice, ts, baseLiquidity, 100, ts);
+        buffer[3] = _sample(basePrice, ts, baseLiquidity, 101, ts + 12);
+        buffer[2] = _sample(basePrice, ts, baseLiquidity, 102, ts + 24);
+        buffer[1] = _sample(basePrice, ts, baseLiquidity, 103, ts + 36);
 
         vm.roll(104);
         vm.warp(ts + 48);
@@ -207,12 +300,12 @@ contract AttackSimulation is Test {
         vm.stopPrank();
 
         (uint256 attackPrice, uint256 updatedAt) = oracle.getLatestPrice();
-        uint256 attackTvl = pool.getTvl();
+        (uint256 attackLiquidity, , , , , ) = pool.getRiskMetrics();
 
         buffer[0] = _sample(
             attackPrice,
             updatedAt,
-            attackTvl,
+            attackLiquidity,
             104,
             block.timestamp
         );
@@ -223,7 +316,7 @@ contract AttackSimulation is Test {
         address wrongRelayer = address(12345);
 
         vm.prank(wrongRelayer);
-        vm.expectRevert(bytes("not relayer"));
+        vm.expectRevert(DroseraResponder.NotRelayer.selector);
         responder.executeResponse(payload);
 
         assertFalse(pool.paused(), "pool should not pause from wrong relayer");
@@ -236,14 +329,14 @@ contract AttackSimulation is Test {
 
     function test_no_false_positive_on_normal_operation() public {
         uint256 price = 1e18;
-        uint256 tvl = 100 ether;
+        uint256 liquidity = 100 ether;
         uint256 ts = block.timestamp;
 
         for (uint256 i = 0; i < 5; i++) {
             buffer[4 - i] = _sample(
                 price,
                 ts + (i * 12),
-                tvl,
+                liquidity,
                 100 + i,
                 ts + (i * 12)
             );
@@ -256,15 +349,17 @@ contract AttackSimulation is Test {
         assertFalse(trigger);
     }
 
-    function test_price_spike_without_tvl_drop_should_not_trigger() public {
+    function test_price_spike_without_liquidity_drop_should_not_trigger()
+        public
+    {
         uint256 price = 1e18;
-        uint256 tvl = 100 ether;
+        uint256 liquidity = 100 ether;
         uint256 ts = block.timestamp;
 
-        buffer[4] = _sample(price, ts, tvl, 100, ts);
-        buffer[3] = _sample(price, ts, tvl, 101, ts + 12);
-        buffer[2] = _sample(price, ts, tvl, 102, ts + 24);
-        buffer[1] = _sample(price, ts, tvl, 103, ts + 36);
+        buffer[4] = _sample(price, ts, liquidity, 100, ts);
+        buffer[3] = _sample(price, ts, liquidity, 101, ts + 12);
+        buffer[2] = _sample(price, ts, liquidity, 102, ts + 24);
+        buffer[1] = _sample(price, ts, liquidity, 103, ts + 36);
 
         vm.roll(104);
         vm.warp(ts + 48);
@@ -275,7 +370,7 @@ contract AttackSimulation is Test {
         buffer[0] = _sample(
             manipulatedPrice,
             updatedAt,
-            tvl,
+            liquidity,
             104,
             block.timestamp
         );
@@ -287,13 +382,13 @@ contract AttackSimulation is Test {
 
     function test_full_drain_caught() public {
         uint256 basePrice = 1e18;
-        uint256 baseTvl = 100 ether;
+        uint256 baseLiquidity = 100 ether;
         uint256 ts = block.timestamp;
 
-        buffer[4] = _sample(basePrice, ts, baseTvl, 100, ts);
-        buffer[3] = _sample(basePrice, ts, baseTvl, 101, ts + 12);
-        buffer[2] = _sample(basePrice, ts, baseTvl, 102, ts + 24);
-        buffer[1] = _sample(basePrice, ts, baseTvl, 103, ts + 36);
+        buffer[4] = _sample(basePrice, ts, baseLiquidity, 100, ts);
+        buffer[3] = _sample(basePrice, ts, baseLiquidity, 101, ts + 12);
+        buffer[2] = _sample(basePrice, ts, baseLiquidity, 102, ts + 24);
+        buffer[1] = _sample(basePrice, ts, baseLiquidity, 103, ts + 36);
 
         vm.roll(104);
         vm.warp(ts + 48);
@@ -311,22 +406,19 @@ contract AttackSimulation is Test {
             (OracleManipulationTrap.ResponsePayload)
         );
 
-        assertEq(
-            uint256(resp.reason),
-            uint256(OracleManipulationTrap.Reason.PriceCrashAndTvlDrop)
-        );
-        assertEq(resp.currentTvl, 0);
+        assertEq(resp.reason, REASON_PRICE_CRASH_AND_LIQUIDITY_DROP);
+        assertEq(resp.currentLiquidity, 0);
     }
 
-    function test_tvl_drop_alone_should_not_trigger() public {
+    function test_liquidity_drop_alone_should_not_trigger() public {
         uint256 price = 1e18;
-        uint256 tvl = 100 ether;
+        uint256 liquidity = 100 ether;
         uint256 ts = block.timestamp;
 
-        buffer[4] = _sample(price, ts, tvl, 100, ts);
-        buffer[3] = _sample(price, ts, tvl, 101, ts + 12);
-        buffer[2] = _sample(price, ts, tvl, 102, ts + 24);
-        buffer[1] = _sample(price, ts, tvl, 103, ts + 36);
+        buffer[4] = _sample(price, ts, liquidity, 100, ts);
+        buffer[3] = _sample(price, ts, liquidity, 101, ts + 12);
+        buffer[2] = _sample(price, ts, liquidity, 102, ts + 24);
+        buffer[1] = _sample(price, ts, liquidity, 103, ts + 36);
 
         vm.roll(104);
         vm.warp(ts + 48);
@@ -336,5 +428,42 @@ contract AttackSimulation is Test {
         (bool trigger, ) = trap.shouldRespond(buffer);
 
         assertFalse(trigger);
+    }
+
+    function test_responder_cooldown_blocks_second_incident() public {
+        OracleManipulationTrap.ResponsePayload
+            memory payloadOne = OracleManipulationTrap.ResponsePayload({
+                pool: address(pool),
+                reason: REASON_PRICE_SPIKE_AND_LIQUIDITY_DROP,
+                currentPrice: 5e18,
+                baselinePrice: 1e18,
+                currentLiquidity: 40 ether,
+                baselineLiquidity: 100 ether,
+                currentBlockNumber: block.number
+            });
+
+        OracleManipulationTrap.ResponsePayload
+            memory payloadTwo = OracleManipulationTrap.ResponsePayload({
+                pool: address(pool),
+                reason: REASON_PRICE_CRASH_AND_LIQUIDITY_DROP,
+                currentPrice: 1e17,
+                baselinePrice: 1e18,
+                currentLiquidity: 30 ether,
+                baselineLiquidity: 100 ether,
+                currentBlockNumber: block.number + 1
+            });
+
+        vm.prank(relayer);
+        responder.executeResponse(abi.encode(payloadOne));
+
+        assertTrue(pool.paused());
+
+        vm.prank(owner);
+        pool.emergencyUnpause();
+
+        vm.roll(block.number + 1);
+        vm.prank(relayer);
+        vm.expectRevert(DroseraResponder.CooldownActive.selector);
+        responder.executeResponse(abi.encode(payloadTwo));
     }
 }
